@@ -39,7 +39,7 @@ pub fn create_response(request: &Request) -> Result<Response> {
         .headers()
         .get("Connection")
         .and_then(|h| h.to_str().ok())
-        .map(|h| h.eq_ignore_ascii_case("Upgrade"))
+        .map(|h| h.split(|c| c == ' ' || c == ',').any(|p| p.eq_ignore_ascii_case("Upgrade")))
         .unwrap_or(false)
     {
         return Err(Error::Protocol(
@@ -89,10 +89,9 @@ pub fn create_response(request: &Request) -> Result<Response> {
 fn write_response<T>(w: &mut dyn io::Write, response: &HttpResponse<T>) -> Result<()> {
     writeln!(
         w,
-        "{version:?} {status} {reason}\r",
+        "{version:?} {status}\r",
         version = response.version(),
-        status = response.status(),
-        reason = response.status().canonical_reason().unwrap_or(""),
+        status = response.status()
     )?;
 
     for (k, v) in response.headers() {

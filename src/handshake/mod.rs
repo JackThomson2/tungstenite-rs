@@ -81,14 +81,7 @@ impl<Role: HandshakeRole> fmt::Display for HandshakeError<Role> {
     }
 }
 
-impl<Role: HandshakeRole> ErrorTrait for HandshakeError<Role> {
-    fn description(&self) -> &str {
-        match *self {
-            HandshakeError::Interrupted(_) => "Interrupted handshake",
-            HandshakeError::Failure(ref e) => e.description(),
-        }
-    }
-}
+impl<Role: HandshakeRole> ErrorTrait for HandshakeError<Role> {}
 
 impl<Role: HandshakeRole> From<Error> for HandshakeError<Role> {
     fn from(err: Error) -> Self {
@@ -125,9 +118,9 @@ fn convert_key(input: &[u8]) -> Result<String, Error> {
     // ... with the string "258EAFA5-E914-47DA-95CA-C5AB0DC85B11" (RFC 6455)
     const WS_GUID: &[u8] = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
     let mut sha1 = Sha1::default();
-    sha1.input(input);
-    sha1.input(WS_GUID);
-    Ok(base64::encode(&sha1.result()))
+    sha1.update(input);
+    sha1.update(WS_GUID);
+    Ok(base64::encode(&sha1.finalize()))
 }
 
 #[cfg(test)]

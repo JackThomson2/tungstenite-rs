@@ -34,12 +34,12 @@ pub struct WebSocketConfig {
     /// means here that the size of the queue is unlimited. The default value is the unlimited
     /// queue.
     pub max_send_queue: Option<usize>,
-    /// The maximum size of a message. `None` means no size limit. The default value is 64 megabytes
+    /// The maximum size of a message. `None` means no size limit. The default value is 64 MiB
     /// which should be reasonably big for all normal use-cases but small enough to prevent
     /// memory eating by a malicious user.
     pub max_message_size: Option<usize>,
     /// The maximum size of a single message frame. `None` means no size limit. The limit is for
-    /// frame payload NOT including the frame header. The default value is 16 megabytes which should
+    /// frame payload NOT including the frame header. The default value is 16 MiB which should
     /// be reasonably big for all normal use-cases but small enough to prevent memory eating
     /// by a malicious user.
     pub max_frame_size: Option<usize>,
@@ -109,6 +109,26 @@ impl<Stream> WebSocket<Stream> {
     /// Change the configuration.
     pub fn set_config(&mut self, set_func: impl FnOnce(&mut WebSocketConfig)) {
         self.context.set_config(set_func)
+    }
+
+    /// Read the configuration.
+    pub fn get_config(&self) -> &WebSocketConfig {
+        self.context.get_config()
+    }
+
+    /// Check if it is possible to read messages.
+    ///
+    /// Reading is impossible after receiving `Message::Close`. It is still possible after
+    /// sending close frame since the peer still may send some data before confirming close.
+    pub fn can_read(&self) -> bool {
+        self.context.can_read()
+    }
+
+    /// Check if it is possible to write messages.
+    ///
+    /// Writing gets impossible immediately after sending or receiving `Message::Close`.
+    pub fn can_write(&self) -> bool {
+        self.context.can_write()
     }
 }
 
@@ -244,6 +264,26 @@ impl WebSocketContext {
     /// Change the configuration.
     pub fn set_config(&mut self, set_func: impl FnOnce(&mut WebSocketConfig)) {
         set_func(&mut self.config)
+    }
+
+    /// Read the configuration.
+    pub fn get_config(&self) -> &WebSocketConfig {
+        &self.config
+    }
+
+    /// Check if it is possible to read messages.
+    ///
+    /// Reading is impossible after receiving `Message::Close`. It is still possible after
+    /// sending close frame since the peer still may send some data before confirming close.
+    pub fn can_read(&self) -> bool {
+        self.state.can_read()
+    }
+
+    /// Check if it is possible to write messages.
+    ///
+    /// Writing gets impossible immediately after sending or receiving `Message::Close`.
+    pub fn can_write(&self) -> bool {
+        self.state.is_active()
     }
 
     /// Read a message from the provided stream, if possible.
@@ -407,9 +447,7 @@ impl WebSocketContext {
         }
         self.write_pending(stream)
     }
-}
 
-impl WebSocketContext {
     /// Try to decode one message frame. May return None.
     fn read_message_frame<Stream>(&mut self, stream: &mut Stream) -> Result<Option<Message>>
     where
@@ -418,7 +456,7 @@ impl WebSocketContext {
         if let Some(mut frame) = self
             .frame
             .read_frame(stream, self.config.max_frame_size)
-            .check_connection_reset(&self.state)?
+            .check_connection_reset(self.state)?
         {
             if !self.state.can_read() {
                 return Err(Error::Protocol(
@@ -609,7 +647,7 @@ impl WebSocketContext {
         trace!("Sending frame: {:?}", frame);
         self.frame
             .write_frame(stream, frame)
-            .check_connection_reset(&self.state)
+            .check_connection_reset(self.state)
     }
 }
 
@@ -658,11 +696,11 @@ impl WebSocketState {
 
 /// Translate "Connection reset by peer" into `ConnectionClosed` if appropriate.
 trait CheckConnectionReset {
-    fn check_connection_reset(self, state: &WebSocketState) -> Self;
+    fn check_connection_reset(self, state: WebSocketState) -> Self;
 }
 
 impl<T> CheckConnectionReset for Result<T> {
-    fn check_connection_reset(self, state: &WebSocketState) -> Self {
+    fn check_connection_reset(self, state: WebSocketState) -> Self {
         match self {
             Err(Error::Io(io_error)) => Err({
                 if !state.can_read() && io_error.kind() == IoErrorKind::ConnectionReset {
