@@ -1,17 +1,22 @@
 //! Verifies that the server returns a `ConnectionClosed` error when the connection
-//! is closedd from the server's point of view and drop the underlying tcp socket.
+//! is closed from the server's point of view and drop the underlying tcp socket.
+#![cfg(any(feature = "native-tls", feature = "rustls-tls"))]
 
-use std::net::{TcpListener, TcpStream};
-use std::process::exit;
-use std::thread::{sleep, spawn};
-use std::time::Duration;
+use std::{
+    net::{TcpListener, TcpStream},
+    process::exit,
+    thread::{sleep, spawn},
+    time::Duration,
+};
 
-use native_tls::TlsStream;
 use net2::TcpStreamExt;
 use tungstenite::{accept, connect, stream::Stream, Error, Message, WebSocket};
 use url::Url;
 
-type Sock = WebSocket<Stream<TcpStream, TlsStream<TcpStream>>>;
+#[cfg(feature = "native-tls")]
+type Sock = WebSocket<Stream<TcpStream, native_tls_crate::TlsStream<TcpStream>>>;
+#[cfg(all(feature = "rustls-tls", not(feature = "native-tls")))]
+type Sock = WebSocket<Stream<TcpStream, rustls::StreamOwned<rustls::ClientSession, TcpStream>>>;
 
 fn do_test<CT, ST>(port: u16, client_task: CT, server_task: ST)
 where
@@ -49,9 +54,7 @@ fn test_server_close() {
     do_test(
         3012,
         |mut cli_sock| {
-            cli_sock
-                .write_message(Message::Text("Hello WebSocket".into()))
-                .unwrap();
+            cli_sock.write_message(Message::Text("Hello WebSocket".into())).unwrap();
 
             let message = cli_sock.read_message().unwrap(); // receive close from server
             assert!(message.is_close());
@@ -85,9 +88,7 @@ fn test_evil_server_close() {
     do_test(
         3013,
         |mut cli_sock| {
-            cli_sock
-                .write_message(Message::Text("Hello WebSocket".into()))
-                .unwrap();
+            cli_sock.write_message(Message::Text("Hello WebSocket".into())).unwrap();
 
             sleep(Duration::from_secs(1));
 
@@ -123,9 +124,7 @@ fn test_client_close() {
     do_test(
         3014,
         |mut cli_sock| {
-            cli_sock
-                .write_message(Message::Text("Hello WebSocket".into()))
-                .unwrap();
+            cli_sock.write_message(Message::Text("Hello WebSocket".into())).unwrap();
 
             let message = cli_sock.read_message().unwrap(); // receive answer from server
             assert_eq!(message.into_data(), b"From Server");

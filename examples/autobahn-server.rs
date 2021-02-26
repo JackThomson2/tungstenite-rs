@@ -1,9 +1,10 @@
-use std::net::{TcpListener, TcpStream};
-use std::thread::spawn;
+use std::{
+    net::{TcpListener, TcpStream},
+    thread::spawn,
+};
 
 use log::*;
-use tungstenite::handshake::HandshakeRole;
-use tungstenite::{accept, Error, HandshakeError, Message, Result};
+use tungstenite::{accept, handshake::HandshakeRole, Error, HandshakeError, Message, Result};
 
 fn must_not_block<Role: HandshakeRole>(err: HandshakeError<Role>) -> Error {
     match err {

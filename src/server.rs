@@ -2,8 +2,10 @@
 
 pub use crate::handshake::server::ServerHandshake;
 
-use crate::handshake::server::{Callback, NoCallback};
-use crate::handshake::HandshakeError;
+use crate::handshake::{
+    server::{Callback, NoCallback},
+    HandshakeError,
+};
 
 use crate::protocol::{WebSocket, WebSocketConfig};
 
@@ -15,9 +17,9 @@ use std::io::{Read, Write};
 /// used by `accept()`.
 ///
 /// This function starts a server WebSocket handshake over the given stream.
-/// If you want TLS support, use `native_tls::TlsStream` or `openssl::ssl::SslStream`
-/// for the stream here. Any `Read + Write` streams are supported, including
-/// those from `Mio` and others.
+/// If you want TLS support, use `native_tls::TlsStream`, `rustls::Stream` or
+/// `openssl::ssl::SslStream` for the stream here. Any `Read + Write` streams are supported,
+/// including those from `Mio` and others.
 pub fn accept_with_config<S: Read + Write>(
     stream: S,
     config: Option<WebSocketConfig>,
@@ -28,9 +30,9 @@ pub fn accept_with_config<S: Read + Write>(
 /// Accept the given Stream as a WebSocket.
 ///
 /// This function starts a server WebSocket handshake over the given stream.
-/// If you want TLS support, use `native_tls::TlsStream` or `openssl::ssl::SslStream`
-/// for the stream here. Any `Read + Write` streams are supported, including
-/// those from `Mio` and others.
+/// If you want TLS support, use `native_tls::TlsStream`, `rustls::Stream` or
+/// `openssl::ssl::SslStream` for the stream here. Any `Read + Write` streams are supported,
+/// including those from `Mio` and others.
 pub fn accept<S: Read + Write>(
     stream: S,
 ) -> Result<WebSocket<S>, HandshakeError<ServerHandshake<S, NoCallback>>> {

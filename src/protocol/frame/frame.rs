@@ -12,7 +12,7 @@ use std::string::{FromUtf8Error, String};
 
 use super::coding::{CloseCode, Control, Data, OpCode};
 use super::mask::{apply_mask, generate_mask};
-use crate::error::{Error, Result};
+use crate::error::{Error, ProtocolError, Result};
 
 /// A struct representing the close command.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -26,10 +26,7 @@ pub struct CloseFrame<'t> {
 impl<'t> CloseFrame<'t> {
     /// Convert into a owned string.
     pub fn into_owned(self) -> CloseFrame<'static> {
-        CloseFrame {
-            code: self.code,
-            reason: self.reason.into_owned().into(),
-        }
+        CloseFrame { code: self.code, reason: self.reason.into_owned().into() }
     }
 }
 
@@ -188,21 +185,12 @@ impl FrameHeader {
         // Disallow bad opcode
         match opcode {
             OpCode::Control(Control::Reserved(_)) | OpCode::Data(Data::Reserved(_)) => {
-                return Err(Error::Protocol(
-                    format!("Encountered invalid opcode: {}", first & 0x0F).into(),
-                ))
+                return Err(Error::Protocol(ProtocolError::InvalidOpcode(first & 0x0F)))
             }
             _ => (),
         }
 
-        let hdr = FrameHeader {
-            is_final,
-            rsv1,
-            rsv2,
-            rsv3,
-            opcode,
-            mask,
-        };
+        let hdr = FrameHeader { is_final, rsv1, rsv2, rsv3, opcode, mask };
 
         Ok(Some((hdr, length)))
     }
@@ -368,7 +356,7 @@ impl Frame {
     pub(crate) fn into_close(self) -> Result<Option<CloseFrame<'static>>> {
         match self.payload.len() {
             0 => Ok(None),
-            1 => Err(Error::Protocol("Invalid close sequence".into())),
+            1 => Err(Error::Protocol(ProtocolError::InvalidCloseSequence)),
             _ => {
                 let data = self.payload;
                 let code = NetworkEndian::read_u16(&data.as_bytes()[0..2]).into();
@@ -448,10 +436,7 @@ impl Frame {
             Vec::new()
         };
 
-        Frame {
-            header: FrameHeader::default(),
-            payload: payload.into(),
-        }
+        Frame { header: FrameHeader::default(), payload: payload.into() }
     }
 
     /// Create a frame from given header and data.

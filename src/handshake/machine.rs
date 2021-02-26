@@ -2,8 +2,10 @@ use bytes::Buf;
 use log::*;
 use std::io::{Cursor, Read, Write};
 
-use crate::error::{Error, Result};
-use crate::util::NonBlockingResult;
+use crate::{
+    error::{CapacityError, Error, ProtocolError, Result},
+    util::NonBlockingResult,
+};
 use input_buffer::{InputBuffer, MIN_READ};
 
 /// A generic handshake state machine.
@@ -23,10 +25,7 @@ impl<Stream> HandshakeMachine<Stream> {
     }
     /// Start writing data to the peer.
     pub fn start_write<D: Into<Vec<u8>>>(stream: Stream, data: D) -> Self {
-        HandshakeMachine {
-            stream,
-            state: HandshakeState::Writing(Cursor::new(data.into())),
-        }
+        HandshakeMachine { stream, state: HandshakeState::Writing(Cursor::new(data.into())) }
     }
     /// Returns a shared reference to the inner stream.
     pub fn get_ref(&self) -> &Stream {
@@ -47,26 +46,24 @@ impl<Stream: Read + Write> HandshakeMachine<Stream> {
                 let read = buf
                     .prepare_reserve(MIN_READ)
                     .with_limit(usize::max_value()) // TODO limit size
-                    .map_err(|_| Error::Capacity("Header too long".into()))?
+                    .map_err(|_| Error::Capacity(CapacityError::HeaderTooLong))?
                     .read_from(&mut self.stream)
                     .no_block()?;
                 match read {
-                    Some(0) => Err(Error::Protocol("Handshake not finished".into())),
-                    Some(_) => Ok(
-                        if let Some((size, obj)) = Obj::try_parse(Buf::bytes(&buf))? {
-                            buf.advance(size);
-                            RoundResult::StageFinished(StageResult::DoneReading {
-                                result: obj,
-                                stream: self.stream,
-                                tail: buf.into_vec(),
-                            })
-                        } else {
-                            RoundResult::Incomplete(HandshakeMachine {
-                                state: HandshakeState::Reading(buf),
-                                ..self
-                            })
-                        },
-                    ),
+                    Some(0) => Err(Error::Protocol(ProtocolError::HandshakeIncomplete)),
+                    Some(_) => Ok(if let Some((size, obj)) = Obj::try_parse(Buf::chunk(&buf))? {
+                        buf.advance(size);
+                        RoundResult::StageFinished(StageResult::DoneReading {
+                            result: obj,
+                            stream: self.stream,
+                            tail: buf.into_vec(),
+                        })
+                    } else {
+                        RoundResult::Incomplete(HandshakeMachine {
+                            state: HandshakeState::Reading(buf),
+                            ..self
+                        })
+                    }),
                     None => Ok(RoundResult::WouldBlock(HandshakeMachine {
                         state: HandshakeState::Reading(buf),
                         ..self
@@ -75,7 +72,7 @@ impl<Stream: Read + Write> HandshakeMachine<Stream> {
             }
             HandshakeState::Writing(mut buf) => {
                 assert!(buf.has_remaining());
-                if let Some(size) = self.stream.write(Buf::bytes(&buf)).no_block()? {
+                if let Some(size) = self.stream.write(Buf::chunk(&buf)).no_block()? {
                     assert!(size > 0);
                     buf.advance(size);
                     Ok(if buf.has_remaining() {
@@ -112,11 +109,7 @@ pub enum RoundResult<Obj, Stream> {
 #[derive(Debug)]
 pub enum StageResult<Obj, Stream> {
     /// Reading round finished.
-    DoneReading {
-        result: Obj,
-        stream: Stream,
-        tail: Vec<u8>,
-    },
+    DoneReading { result: Obj, stream: Stream, tail: Vec<u8> },
     /// Writing round finished.
     DoneWriting(Stream),
 }
