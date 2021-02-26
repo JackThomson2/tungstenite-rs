@@ -1,8 +1,8 @@
 use std::{net::TcpListener, thread::spawn};
-
 use tungstenite::{
-    accept_hdr,
     handshake::server::{Request, Response},
+    protocol::WebSocketConfig,
+    server::accept_hdr_with_config,
 };
 
 fn main() {
@@ -25,12 +25,24 @@ fn main() {
 
                 Ok(response)
             };
-            let mut websocket = accept_hdr(stream.unwrap(), callback).unwrap();
+
+            let config = Some(WebSocketConfig {
+                max_send_queue: None,
+                max_message_size: None,
+                max_frame_size: None,
+                // This setting allows to accept client frames which are not masked
+                // This is not in compliance with RFC 6455 but might be handy in some
+                // rare cases where it is necessary to integrate with existing/legacy
+                // clients which are sending unmasked frames
+                accept_unmasked_frames: true,
+            });
+
+            let mut websocket = accept_hdr_with_config(stream.unwrap(), callback, config).unwrap();
 
             loop {
                 let msg = websocket.read_message().unwrap();
                 if msg.is_binary() || msg.is_text() {
-                    websocket.write_message(msg).unwrap();
+                    println!("received message {}", msg);
                 }
             }
         });

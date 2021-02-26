@@ -1,18 +1,27 @@
 //! Server handshake machine.
 
-use std::io::{self, Read, Write};
-use std::marker::PhantomData;
-use std::result::Result as StdResult;
+use std::{
+    io::{self, Read, Write},
+    marker::PhantomData,
+    result::Result as StdResult,
+};
 
-use http::{HeaderMap, Request as HttpRequest, Response as HttpResponse, StatusCode};
+use http::{
+    response::Builder, HeaderMap, Request as HttpRequest, Response as HttpResponse, StatusCode,
+};
 use httparse::Status;
 use log::*;
 
-use super::headers::{FromHttparse, MAX_HEADERS};
-use super::machine::{HandshakeMachine, StageResult, TryParse};
-use super::{convert_key, HandshakeRole, MidHandshake, ProcessingResult};
-use crate::error::{Error, Result};
-use crate::protocol::{Role, WebSocket, WebSocketConfig};
+use super::{
+    derive_accept_key,
+    headers::{FromHttparse, MAX_HEADERS},
+    machine::{HandshakeMachine, StageResult, TryParse},
+    HandshakeRole, MidHandshake, ProcessingResult,
+};
+use crate::{
+    error::{Error, ProtocolError, Result},
+    protocol::{Role, WebSocket, WebSocketConfig},
+};
 
 /// Server request type.
 pub type Request = HttpRequest<()>;
@@ -23,16 +32,13 @@ pub type Response = HttpResponse<()>;
 /// Server error response type.
 pub type ErrorResponse = HttpResponse<Option<String>>;
 
-/// Create a response for the request.
-pub fn create_response(request: &Request) -> Result<Response> {
+fn create_parts<T>(request: &HttpRequest<T>) -> Result<Builder> {
     if request.method() != http::Method::GET {
-        return Err(Error::Protocol("Method is not GET".into()));
+        return Err(Error::Protocol(ProtocolError::WrongHttpMethod));
     }
 
     if request.version() < http::Version::HTTP_11 {
-        return Err(Error::Protocol(
-            "HTTP version should be 1.1 or higher".into(),
-        ));
+        return Err(Error::Protocol(ProtocolError::WrongHttpVersion));
     }
 
     if !request
@@ -42,9 +48,7 @@ pub fn create_response(request: &Request) -> Result<Response> {
         .map(|h| h.split(|c| c == ' ' || c == ',').any(|p| p.eq_ignore_ascii_case("Upgrade")))
         .unwrap_or(false)
     {
-        return Err(Error::Protocol(
-            "No \"Connection: upgrade\" in client request".into(),
-        ));
+        return Err(Error::Protocol(ProtocolError::MissingConnectionUpgradeHeader));
     }
 
     if !request
@@ -54,39 +58,43 @@ pub fn create_response(request: &Request) -> Result<Response> {
         .map(|h| h.eq_ignore_ascii_case("websocket"))
         .unwrap_or(false)
     {
-        return Err(Error::Protocol(
-            "No \"Upgrade: websocket\" in client request".into(),
-        ));
+        return Err(Error::Protocol(ProtocolError::MissingUpgradeWebSocketHeader));
     }
 
-    if !request
-        .headers()
-        .get("Sec-WebSocket-Version")
-        .map(|h| h == "13")
-        .unwrap_or(false)
-    {
-        return Err(Error::Protocol(
-            "No \"Sec-WebSocket-Version: 13\" in client request".into(),
-        ));
+    if !request.headers().get("Sec-WebSocket-Version").map(|h| h == "13").unwrap_or(false) {
+        return Err(Error::Protocol(ProtocolError::MissingSecWebSocketVersionHeader));
     }
 
     let key = request
         .headers()
         .get("Sec-WebSocket-Key")
-        .ok_or_else(|| Error::Protocol("Missing Sec-WebSocket-Key".into()))?;
+        .ok_or(Error::Protocol(ProtocolError::MissingSecWebSocketKey))?;
 
     let builder = Response::builder()
         .status(StatusCode::SWITCHING_PROTOCOLS)
         .version(request.version())
         .header("Connection", "Upgrade")
         .header("Upgrade", "websocket")
-        .header("Sec-WebSocket-Accept", convert_key(key.as_bytes())?);
+        .header("Sec-WebSocket-Accept", derive_accept_key(key.as_bytes()));
 
-    Ok(builder.body(())?)
+    Ok(builder)
+}
+
+/// Create a response for the request.
+pub fn create_response(request: &Request) -> Result<Response> {
+    Ok(create_parts(&request)?.body(())?)
+}
+
+/// Create a response for the request with a custom body.
+pub fn create_response_with_body<T>(
+    request: &HttpRequest<T>,
+    generate_body: impl FnOnce() -> T,
+) -> Result<HttpResponse<T>> {
+    Ok(create_parts(&request)?.body(generate_body())?)
 }
 
 // Assumes that this is a valid response
-fn write_response<T>(w: &mut dyn io::Write, response: &HttpResponse<T>) -> Result<()> {
+fn write_response<T>(mut w: impl io::Write, response: &HttpResponse<T>) -> Result<()> {
     writeln!(
         w,
         "{version:?} {status}\r",
@@ -117,13 +125,11 @@ impl TryParse for Request {
 impl<'h, 'b: 'h> FromHttparse<httparse::Request<'h, 'b>> for Request {
     fn from_httparse(raw: httparse::Request<'h, 'b>) -> Result<Self> {
         if raw.method.expect("Bug: no method in header") != "GET" {
-            return Err(Error::Protocol("Method is not GET".into()));
+            return Err(Error::Protocol(ProtocolError::WrongHttpMethod));
         }
 
         if raw.version.expect("Bug: no HTTP version") < /*1.*/1 {
-            return Err(Error::Protocol(
-                "HTTP version should be 1.1 or higher".into(),
-            ));
+            return Err(Error::Protocol(ProtocolError::WrongHttpVersion));
         }
 
         let headers = HeaderMap::from_httparse(raw.headers)?;
@@ -195,7 +201,7 @@ pub struct ServerHandshake<S, C> {
     /// WebSocket configuration.
     config: Option<WebSocketConfig>,
     /// Error code/flag. If set, an error will be returned after sending response to the client.
-    error_code: Option<u16>,
+    error_response: Option<ErrorResponse>,
     /// Internal stream type.
     _marker: PhantomData<S>,
 }
@@ -212,7 +218,7 @@ impl<S: Read + Write, C: Callback> ServerHandshake<S, C> {
             role: ServerHandshake {
                 callback: Some(callback),
                 config,
-                error_code: None,
+                error_response: None,
                 _marker: PhantomData,
             },
         }
@@ -229,13 +235,9 @@ impl<S: Read + Write, C: Callback> HandshakeRole for ServerHandshake<S, C> {
         finish: StageResult<Self::IncomingData, Self::InternalStream>,
     ) -> Result<ProcessingResult<Self::InternalStream, Self::FinalResult>> {
         Ok(match finish {
-            StageResult::DoneReading {
-                stream,
-                result,
-                tail,
-            } => {
+            StageResult::DoneReading { stream, result, tail } => {
                 if !tail.is_empty() {
-                    return Err(Error::Protocol("Junk after client request".into()));
+                    return Err(Error::Protocol(ProtocolError::JunkAfterRequest));
                 }
 
                 let response = create_response(&result)?;
@@ -254,27 +256,28 @@ impl<S: Read + Write, C: Callback> HandshakeRole for ServerHandshake<S, C> {
 
                     Err(resp) => {
                         if resp.status().is_success() {
-                            return Err(Error::Protocol(
-                                "Custom response must not be successful".into(),
-                            ));
+                            return Err(Error::Protocol(ProtocolError::CustomResponseSuccessful));
                         }
 
-                        self.error_code = Some(resp.status().as_u16());
+                        self.error_response = Some(resp);
+                        let resp = self.error_response.as_ref().unwrap();
 
                         let mut output = vec![];
                         write_response(&mut output, &resp)?;
+
                         if let Some(body) = resp.body() {
                             output.extend_from_slice(body.as_bytes());
                         }
+
                         ProcessingResult::Continue(HandshakeMachine::start_write(stream, output))
                     }
                 }
             }
 
             StageResult::DoneWriting(stream) => {
-                if let Some(err) = self.error_code.take() {
+                if let Some(err) = self.error_response.take() {
                     debug!("Server handshake failed.");
-                    return Err(Error::Http(StatusCode::from_u16(err)?));
+                    return Err(Error::Http(err));
                 } else {
                     debug!("Server handshake done.");
                     let websocket = WebSocket::from_raw_socket(stream, Role::Server, self.config);
@@ -287,9 +290,7 @@ impl<S: Read + Write, C: Callback> HandshakeRole for ServerHandshake<S, C> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::machine::TryParse;
-    use super::create_response;
-    use super::Request;
+    use super::{super::machine::TryParse, create_response, Request};
 
     #[test]
     fn request_parsing() {
